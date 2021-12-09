@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Web Serial Motor Control</title>
+    <link rel="stylesheet" href="./assets/style.css">
+  </head>
+  <body>
+    <div class="main">
+      <div class="header">
+        <h3>Motor Control Web Interface</h3>
+      </div>
+      <div class="displayBox">
+        <textarea id="outputTextArea" rows="20" cols="60" readonly></textarea>
+        <div class="inputRow">
+          <input id="inputTextArea" type="text" size="70"></input>
+          <button id="btnSendInput">Send</button>
+        </div>
+      </div>
+      <div class="connectSection">
+        <label>Baudrate:</label>
+        <select name="baudrate" class="select" id="selectBaudrate">
+          <option value="9600">9600</option>
+          <option value="14400">14400</option>
+          <option value="19200">19200</option>
+          <option value="28800">28800</option>
+          <option value="38400">38400</option>
+          <option value="57600">57600</option>
+          <option value="115200">115200</option>
+          <option value="230400" selected="selected">230400</option>
+        </select>
+        <button id="btnConnect">Connect 🔌</button>
+        <button id="btnDisconnect" style="margin-right:30%">Close ❌</button>
+        <label>Device:</label>
+        <select name="device" class="select" id="selectDevice">
+          <option value="" disabled selected hidden>Select a device</option>
+        </select>
+      </div>
+      <div class="mosfetSection">
+        <button id="btnDetectDevice">Scan Device</button>
+        <button id="btnEnableMosfet">Enable MOSFET</button>
+        <button id="btnDisableMosfet">Disable MOSFET</button>
+        <button id="btnGetMotorStatus">Motor Status</button>
+        <button id="btnGetMotorVersion">Motor Version</button>
+      </div>
+      <div class="modeSection">
+        <button id="btnSystemReset">System Reset</button>
+        <button id="btnHoming">Homing</button>
+        <button id="btnCalibration">Calibration</button>
+        <button id="btnCloseLoop">CloseLoop</button>
+        <button id="btnEmergencyStop">Emergency Stop</button>
+      </div>
+      <div class="deviceSection">
+        <label>ID:</label>
+        <input type="text" id="inputUniqueId"></input>
+        <label>Alias:</label>
+        <input type="text" id="inputAlias"></input>
+        <button id="btnSetAlias">Update Alias</button>
+      </div>
+      <div class="maxVelSection">
+        <label>MaxVel:<label>
+        <input type="number" id="inputMaxVel"></input>
+        <button id="btnSetMaxVel">Apply</button>
+      </div>
+      <div class="maxAccelSection">
+        <label>MaxAccel:</label>
+        <input type="number" id="inputMaxAccel"></input>
+        <button id="btnSetMaxAccel">Apply</button>
+      </div>
+      <div class="moveSection">
+        <label>Displacement:</label>
+        <input type="number" id="inputDisplacement"></input>
+        <label>TimeSteps:</label>
+        <input type="number" id="inputTimeSteps"></input>
+        <button id="btnMove">Move</button>
+      </div>
+      <div class="moveSection">
+        <label>Velocity:</label>
+        <input type="number" id="inputVel"></input>
+        <label>TimeSteps:</label>
+        <input type="number" id="inputTimeSteps2"></input>
+        <button id="btnMoveWithVelocity">Move</button>
+      </div>
+      <div class="moveSection">
+        <label>Acceleration:</label>
+        <input type="number" id="inputAccel"></input>
+        <label>TimeSteps:</label>
+        <input type="number" id="inputTimeSteps3"></input>
+        <button id="btnMoveWithAcceleration">Move</button>
+      </div>
+      <div class="flashSection">
+        <p>Select a firmware to flash(.bin)</p>
+        <input name="firmware" type="file" accept=".firmware" id="inputFirmware"/></input>
+        <!-- <input type="submit" value="Flash" id="inputFlash"/> -->
+        <button id="btnFlash">Flash</button>
+      </div>
+      <!-- <div>
+        <button id="btnRead">read</button>
+        <button id="btnWrite">write</button>
+      </div> -->
+    </div>
+
+    <script>
+
+      let keepReading = true;
+      let timeout = 300; //timeout for serial operations
+      let modelCode, firmwareCompatibilityCode;
+      let selectedFirmware = null;
+      let port, reader, writer;
+      let readBuffer = [];
+      let textareaOutput = '';
+      let lastWrite = [];
+      let myAxis = 'A';
+      // var deviceList = new Object();
+      var deviceList = {'0000000000000000000': 'A'};
+
+      async function serialWrite(byteArray) {
+        try {
+          await writer.write(byteArray);
+        } catch (error) {
+          console.log(error);
+        }
+      }
+
+      async function flushReadBuffer() {
+        readBuffer = [];
+        console.log("Flush buffer");
+        // await readBuffer.splice(0, readBuffer.length);
+      }
+
+      function hasSerialConnection() {
+        if(port) {
+          return true;
+        } else {
+          return false;
+        }
+      }
+
+      function clearSelectDeviceList() {
+        var select = document.getElementById('selectDevice');
+        var length = select.options.length - 1;
+        for(let i = length; i >=1; i--) {
+          select.remove(i);
+        }
+      }
+
+      function updateSelectDeviceList() {
+        var select = document.getElementById('selectDevice');
+        for(const [key, value] of Object.entries(deviceList)) {
+          var opt = document.createElement('option');
+          opt.value = key;
+          opt.innerHTML = value;
+          select.appendChild(opt);
+        }
+      }
+
+      function displayMessage(message) {
+        var textarea = document.getElementById('outputTextArea');
+        textareaOutput += message;
+        textarea.value = textareaOutput;
+        textarea.scrollTop = textarea.scrollHeight;
+      }
+
+      setInterval(() => {
+        if(textareaOutput.length >= 20000) {
+          textareaOutput = textareaOutput.slice(2000);
+        }
+      }, 2000);
+
+      // setInterval(() => {
+      //   for(const [key, value] of Object.entries(deviceList)) {
+      //     console.log(key, value);
+      //   }
+      // }, 2000);
+
+      navigator.serial.addEventListener('connect', (e) => {
+        // Connect to `e.target` or add it to a list of available ports.
+      });
+
+      navigator.serial.addEventListener('disconnect', (e) => {
+        // Remove `e.target` from the list of available ports.
+      });
+
+      // document.getElementById("btnWrite").addEventListener("click", async() => {
+      //   // var string = "x = 1 + 2";
+      //   var string = "process.memory()\n";
+      //   var writeFrame = new TextEncoder().encode(string);
+      //   console.log(writeFrame);
+      //   await writer.write(writeFrame);
+      // });
+
+      document.getElementById('inputTextArea').addEventListener('keydown', async function(event) {
+        if(event.keyCode == 13) {
+          var input = document.getElementById('inputTextArea').value + '\n';
+          var writeFrame = new TextEncoder().encode(input);
+          await writer.write(writeFrame);
+          flushReadBuffer();
+          setTimeout(() => {
+            console.log(readBuffer);
+          }, timeout);
+          lastWrite = input;
+          document.getElementById('inputTextArea').value = '';
+          return true;
+        } else {
+          return false;
+        }
+      });
+
+      document.getElementById("btnConnect").addEventListener("click", async() => {
+
+        port = await navigator.serial.requestPort();
+        const selectedBaudrate = parseInt(document.getElementById("selectBaudrate").value);
+        await port.open({ baudRate: selectedBaudrate });
+        console.log("port open")
+        document.getElementById("btnConnect").innerText = 'Connected ✅';
+        displayMessage("Successfully connected to serial port!\n");
+        keepReading = true;
+        reader = port.readable.getReader();
+        writer = port.writable.getWriter();
+
+        while(port.readable && keepReading) {
+          try {
+            while(true) {
+              const {value, done} = await reader.read();
+              if(done) {
+                reader.releaseLock();
+                writer.releaseLock();
+                break;
+              }
+              if(value) {
+                // var stringValue = String.fromCharCode(...value);
+                var stringValue = "Received: " + toHexString(value) + '\n';
+                readBuffer.push(...value);
+                displayMessage(stringValue);
+              }
+            }
+          } catch(error) {
+            document.getElementById("btnConnect").innerText = 'connect 🔌';
+            console.log(error);
+          } finally {
+            // console.log(port.readable, keepReading);
+          }
+        }
+
+      });
+
+      document.getElementById("btnDisconnect").addEventListener("click", async() => {
+        keepReading = false;
+        if(port) {
+          reader.cancel();
+          reader.releaseLock();
+          writer.releaseLock();
+          await port.close();
+          port = undefined;
+        }
+        document.getElementById("btnConnect").innerText = 'connect 🔌';
+        displayMessage("Disconnected from serial port\n");
+        console.log("port close")
+      });
+
+      document.getElementById("btnEnableMosfet").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var writeFrame = enableMOSFET(myAxis);
+          flushReadBuffer();
+          serialWrite(writeFrame);
+          displayMessage(`Enable MOSFET ${myAxis}\n`);
+          displayMessage("Sent: " + toHexString(writeFrame) + '\n');
+          setTimeout(() => {
+            console.log(readBuffer);
+          }, timeout);
+        }
+      });
+
+      document.getElementById("btnDisableMosfet").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var writeFrame = disableMOSFET(myAxis);
+          flushReadBuffer();
+          serialWrite(writeFrame);
+          displayMessage(`Disable MOSFET ${myAxis}\n`);
+          displayMessage("Sent: " + toHexString(writeFrame) + '\n');
+          setTimeout(() => {
+            console.log(readBuffer);
+          }, timeout);
+        }
+      });
+
+      document.getElementById("btnGetMotorStatus").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var writeFrame = getMotorStatus(myAxis);
+          flushReadBuffer();
+          serialWrite(writeFrame);
+          displayMessage(`Get motor status ${myAxis}\n`);
+          displayMessage("Sent: " + toHexString(writeFrame) + '\n');
+          setTimeout(() => {
+            console.log(readBuffer);
+            var resp = readBuffer;
+            statusMessage = parseMotorStatusResponse(resp);
+            displayMessage(statusMessage);
+          }, timeout);
+        }
+      });
+
+      document.getElementById("btnSystemReset").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var writeFrame = systemReset(myAxis);
+          flushReadBuffer();
+          serialWrite(writeFrame);
+          displayMessage(`System reset ${myAxis}\n`);
+          displayMessage("Sent: " + toHexString(writeFrame) + '\n');
+          setTimeout(() => {
+            console.log(readBuffer);
+          }, timeout);
+        }
+      });
+
+      document.getElementById("btnSetMaxVel").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var maxVel = document.getElementById("inputMaxVel").value;
+          if(maxVel) {
+            var writeFrame = setMaxVelocity(myAxis, maxVel);
+            flushReadBuffer();
+            serialWrite(writeFrame);
+          }
+          else {
+            window.alert("Please check that you have entered a valid maxVel");
+          }
+        }
+      });
+
+      document.getElementById("btnSetMaxAccel").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var maxAccel = document.getElementById("inputMaxAccel").value;
+          if(maxAccel) {
+            var writeFrame = setMaxVelocity(myAxis, maxAccel);
+            flushReadBuffer();
+            serialWrite(writeFrame);
+          }
+          else {
+            window.alert("Please check that you have entered a valid maxAccel");
+          }
+        }
+      });
+
+      document.getElementById("btnMove").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var displacement = document.getElementById("inputDisplacement").value;
+          var timeSteps = document.getElementById("inputTimeSteps").value;
+          if(displacement && timeSteps) {
+            var writeFrame = trapezoidMove(myAxis, displacement, timeSteps);
+            flushReadBuffer();
+            serialWrite(writeFrame);
+            setTimeout(() => {
+              console.log(readBuffer);
+            }, timeout);
+          }
+          else {
+            window.alert("Please check that you have entered both valid displacement and timeSteps");
+          }
+        }
+      });
+
+      document.getElementById("btnHoming").addEventListener("click", async () => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var writeFrame = motorHoming(myAxis);
+          flushReadBuffer();
+          serialWrite(writeFrame);
+          displayMessage(`Motor homing ${myAxis}\n`);
+          displayMessage("Sent: " + toHexString(writeFrame) + '\n');
+          setTimeout(() => {
+            console.log(readBuffer);
+          }, timeout);
+        }
+      });
+
+      document.getElementById("btnCloseLoop").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var writeFrame = motorCloseLoop(myAxis);
+          flushReadBuffer();
+          serialWrite(writeFrame);
+          displayMessage(`Motor close-loop ${myAxis}\n`);
+          displayMessage("Sent: " + toHexString(writeFrame) + '\n');
+          setTimeout(() => {
+            console.log(readBuffer);
+          }, timeout);
+        }
+      });
+
+      document.getElementById("btnMoveWithVelocity").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var velocity = document.getElementById("inputVel").value;
+          var timeSteps = document.getElementById("inputTimeSteps2").value;
+          if(velocity && timeSteps) {
+            var writeFrame = moveWithVelocity(myAxis, velocity, timeSteps);
+            flushReadBuffer();
+            serialWrite(writeFrame);
+            setTimeout(() => {
+              console.log(readBuffer);
+            }, timeout);
+          }
+          else {
+            window.alert("Please check that you have entered both valid velocity and timeSteps");
+          }
+        }
+      });
+
+      document.getElementById("btnMoveWithAcceleration").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var acceleration = document.getElementById("inputAccel").value;
+          var timeSteps = document.getElementById("inputTimeSteps3").value;
+          if(acceleration && timeSteps) {
+            var writeFrame = moveWithAcceleration(myAxis, acceleration, timeSteps);
+            flushReadBuffer();
+            serialWrite(writeFrame);
+            setTimeout(() => {
+              console.log(readBuffer);
+            }, timeout);
+          }
+          else {
+            window.alert("Please check that you have entered both valid acceleration and timeSteps");
+          }
+        }
+      });
+
+      document.getElementById("btnDetectDevice").addEventListener("click", async() => {
+        if(!port) {
+          window.alert("Unable to write, please check your serial connection");
+        }
+        else {
+          var writeFrame = detectDevice();
+          var numOfScans = 5;
+          var scanInterval = 1000;
+          for(let i = 0; i < numOfScans; i++) {
+            // flushReadBuffer();
+            // serialWrite(writeFrame)
+            setTimeout(() => {
+              flushReadBuffer();
+            }, scanInterval * i);
+            setTimeout(() => {
+              serialWrite(writeFrame);
+            }, scanInterval * i);
+            setTimeout(() => {
+              console.log(readBuffer);
+              var resp = readBuffer;
+              const [id, alias] = parseDetectDeviceResponse(resp);
+              var message = `Device found: \nID: ${id} Alias: ${alias}\n\n`;
+              deviceList[id.toString()] = alias;
+              displayMessage(message);
+              console.log(deviceList);
+            }, scanInterval * (i + 1));
+          }
+          setTimeout(() => {
+            clearSelectDeviceList();
+            updateSelectDeviceList();
+          }, scanInterval * (numOfScans + 1))
+        }
+      });
+
+      document.getElementById("selectDevice").addEventListener("change", async() => {
+        var select = document.getElementById('selectDevice');
+        myAxis = select.options[select.selectedIndex].text;
+        var message = `You have selected --${myAxis}--\n`;
+        displayMessage(message);
+      });
+
+      document.getElementById("btnSetAlias").addEventListener("click", async() => {
+        var id = document.getElementById("inputUniqueId").value;
+        var alias = document.getElementById("inputAlias").value;
+        var message = `ID: ${id} New alias: ${alias}\n`
+        alias = alias.charCodeAt(0);
+        if(id in deviceList) {
+          var writeFrame = setAlias(id, alias);
+          flushReadBuffer();
+          serialWrite(writeFrame);
+          displayMessage("Sent: " + toHexString(writeFrame) + '\n');
+          displayMessage(message);
+          setTimeout(() => {
+            console.log(readBuffer);
+          }, timeout);
+        }
+        else {
+          displayMessage("ID doesn't exist!\n");
+        }
+      });
+
+      document.getElementById("inputFirmware").addEventListener("click", async(event) => {
+        selectedFirmware = null;
+      });
+
+      document.getElementById("inputFirmware").addEventListener("change", async(event) => {
+        var reader = new FileReader();
+        let file = event.target.files[0];
+        console.log(file);
+        reader.onerror = () => {
+          console.log("Error while loading file");
+        }
+        reader.onload = async function(event) {
+          var startTime, endTime;
+          startTime = new Date();
+          var rawData = event.target.result;
+          // var modelCode = rawData.slice(0, 8);
+          // var firmwareCompatibilityCode = rawData[8];
+          // console.log("modelCode", modelCode);
+          // console.log("firmwareCompatibilityCode", firmwareCompatibilityCode);
+          // rawData = rawData.slice(9);
+          while(rawData.length & 0x03 != 0) {
+            rawData.push(0);
+          }
+          if(rawData.length > (10 * 1024 * 1024)) {
+            window.alert("File too large (>10Mb)");
+          } else {
+            var data = new Uint8Array(rawData);
+            modelCode = data.slice(0, 8);
+            firmwareCompatibilityCode = data[8];
+            displayMessage(`\nFirmware name: ${file.name}\n`);
+            displayMessage(`Firmware size: ${data.length} bytes\n`)
+            displayMessage(`ModelCode: ${modelCode}\n`);
+            displayMessage(`FirmwareCompatibilityCode: ${firmwareCompatibilityCode}\n`);
+            // console.log("modelCode", modelCode);
+            // console.log("firmwareCompatibilityCode", firmwareCompatibilityCode);
+            data = data.slice(9);
+            var firmwareSize = (data.length >>> 2) - 1;
+            var crc = crc32(data.slice(4));
+            var byteArray = new Uint8Array([...intToBytes(firmwareSize, 4), ...data.slice(4), ...intToBytes(crc, 4)]);
+            // console.log(data);
+            // console.log(data.slice(4));
+            console.log(byteArray);
+            console.log(`Firmware size: ${firmwareSize}`);
+            endTime = new Date();
+            // console.log(endTime.getTime() - startTime.getTime());
+            selectedFirmware = byteArray;
+          }
+        }
+        // reader.readAsBinaryString(event.target.files[0]);
+        reader.readAsArrayBuffer(event.target.files[0]);
+      });
+
+      document.getElementById("btnFlash").addEventListener("click", async() => {
+        const FLASH_PAGE_SIZE = 2048;
+        const BOOTLOADER_N_PAGES = 5;   //10kB bootloader
+        const FIRST_FIRMWARE_PAGE_NUMBER = (BOOTLOADER_N_PAGES);
+        const LAST_FIRMWARE_PAGE_NUMBER = 30;
+        const FLASH_SETTINGS_PAGE_NUMBER = 31;
+        var pageNum = FIRST_FIRMWARE_PAGE_NUMBER;
+        var fileContent = selectedFirmware;
+        var totalPageNum = Math.ceil(fileContent.length / FLASH_PAGE_SIZE);
+        // console.log(`totalPageNum: ${totalPageNum}`);
+
+        async function writeOnePage() {
+          if(pageNum > LAST_FIRMWARE_PAGE_NUMBER) {
+            window.alert("Error: firmware is too large");
+          }
+          console.log(`Size left: ${fileContent.length}`);
+          if(fileContent.length < FLASH_PAGE_SIZE) {
+            var appendLen = FLASH_PAGE_SIZE - fileContent.length;
+            var zeros = new Uint8Array(appendLen).fill(0);
+            fileContent = new Uint8Array([...fileContent, ...zeros]);
+            // fileContent.push(...zeros);
+          }
+          // var byteArray = programOnePage(pageNum, fileContent.slice(0, FLASH_PAGE_SIZE));
+          var byteArray = programOnePage(modelCode, firmwareCompatibilityCode, pageNum, fileContent.slice(0, FLASH_PAGE_SIZE));
+          console.log(byteArray);
+          serialWrite(byteArray.slice(0, 1000))
+          .then(setTimeout(() => {
+            console.log("second write");
+            serialWrite(byteArray.slice(1000, 2000));
+          }, 50))
+          .then(setTimeout(() => {
+            console.log("third write");
+            serialWrite(byteArray.slice(2000))
+          }, 100));
+          fileContent = fileContent.slice(FLASH_PAGE_SIZE);
+          pageNum = pageNum + 1;
+        }
+
+        var byteArray = systemReset();
+        serialWrite(byteArray);
+
+        for(let i = 0; i < totalPageNum; i++) {
+          // if(pageNum > LAST_FIRMWARE_PAGE_NUMBER) {
+          //   window.alert("Error: firmware is too large");
+          //   break;
+          // }
+          // console.log(`Size left: ${fileContent.length}`);
+          // if(fileContent.length < FLASH_PAGE_SIZE) {
+          //   var appendLen = FLASH_PAGE_SIZE - fileContent.length;
+          //   var zeros = new Uint8Array(appendLen).fill(0);
+          //   fileContent = new Uint8Array([...fileContent, ...zeros]);
+          //   // fileContent.push(...zeros);
+          // }
+          // var byteArray = programOnePage(pageNum, fileContent.slice(0, FLASH_PAGE_SIZE));
+          // await serialWrite(byteArray.slice(0, 1000))
+          // .then(setTimeout(() => {
+          //   console.log("second write")
+          //   serialWrite(byteArray.slice(1000, 2000));
+          // }, 200))
+          // .then(setTimeout(() => {
+          //   serialWrite(byteArray.slice(2000))
+          // }, 400));
+          // console.log(i)
+          // fileContent = fileContent.slice(FLASH_PAGE_SIZE);
+          // pageNum = pageNum + 1;
+          let delayTime;
+          if(i === 0) {
+            delayTime = 100;
+          }
+          else {
+            delayTime = i * 300;
+          }
+          setTimeout(() => {
+            writeOnePage();
+          }, delayTime);
+        }
+
+        setTimeout(() => {
+          var byteArray = systemReset();
+          serialWrite(byteArray);
+        }, totalPageNum * 300);
+      });
+
+    </script>
+
+    <script src="./assets/command.js"></script>
+  </body>
+</html>
